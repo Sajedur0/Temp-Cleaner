@@ -56,6 +56,11 @@ fn main() -> ExitCode {
             ExitCode::from(EXIT_USAGE)
         }
         ParseOutcome::Run(cfg) => {
+            // Deleting files inside protected system folders (Prefetch,
+            // C:\Windows\Temp…) needs the backup/restore rights an elevated
+            // token already holds but keeps switched off by default.
+            platform::enable_cleanup_privileges();
+
             // No arguments at all = double-clicked: friendly GUI flow.
             // Any argument = console mode.
             let code = if args.is_empty() {
@@ -210,11 +215,26 @@ fn gui_mode(cfg: &Config) -> u8 {
             format_size(bytes)
         ));
     }
+    for r in &reports {
+        if r.dirs_unreadable > 0 {
+            text.push_str(&format!(
+                "\n• {}: could not be read (access denied — need Administrator?)",
+                r.label
+            ));
+        }
+    }
     if recycle_bytes > 0 {
         text.push_str(&format!(
             "\n• Recycle Bin: about {}",
             format_size(recycle_bytes)
         ));
+    }
+    if !platform::is_elevated() {
+        text.push_str(
+            "\n\nNote: Temp Cleaner is not running as Administrator.\n\
+             Windows temp, Prefetch and crash dumps will be skipped\n\
+             (access denied). Right-click → Run as administrator.",
+        );
     }
     text.push_str(&format!(
         "\n\nTotal: {} files — {}\n\nDelete these files now?\n{}",
@@ -231,9 +251,30 @@ fn gui_mode(cfg: &Config) -> u8 {
     // 3) Clean
     let done = clean_all(cfg, &mut logger);
     let mut freed = done.bytes_freed;
-    if cfg.empty_recycle_bin && platform::empty_recycle_bin() {
-        freed += recycle_bytes;
-        logger.info("Recycle Bin emptied.");
+    let mut bin_failed = false;
+    if cfg.empty_recycle_bin {
+        // Re-query afterwards: the Shell happily reports success while
+        // leaving items behind, and reporting the estimate here would
+        // claim space that was never actually freed.
+        let (before, after) = platform::empty_recycle_bin();
+        if after < before {
+            freed += before - after;
+            logger.info(&format!(
+                "Recycle Bin emptied ({} freed).",
+                format_size(before - after)
+            ));
+        } else if before > 0 {
+            bin_failed = true;
+            logger.info("Recycle Bin could not be emptied (files in use, or items owned by another user).");
+        } else {
+            logger.info("Recycle Bin was already empty.");
+        }
+    }
+    if done.dirs_unreadable > 0 {
+        logger.info(&format!(
+            "{} folders could not be read (access denied — try running as Administrator).",
+            format_number(done.dirs_unreadable)
+        ));
     }
 
     let mut summary = format!(
@@ -243,13 +284,24 @@ fn gui_mode(cfg: &Config) -> u8 {
     );
     if done.files_skipped > 0 {
         summary.push_str(&format!(
-            "\n({} in use or recent — skipped)",
-            format_number(done.files_skipped)
+            "\nSkipped {} — {} in use, {} no access, {} recent",
+            format_number(done.files_skipped),
+            format_number(done.skipped_in_use),
+            format_number(done.skipped_denied),
+            format_number(done.skipped_recent)
         ));
+    }
+    if bin_failed {
+        summary.push_str("\nRecycle Bin could not be emptied");
     }
     logger.info(&summary.replace('\n', " | "));
     platform::show_toast(&summary, true);
-    EXIT_OK
+
+    if bin_failed {
+        EXIT_PARTIAL
+    } else {
+        EXIT_OK
+    }
 }
 
 // ---------------------------------------------------------- console mode
@@ -278,6 +330,14 @@ fn console_mode(cfg: &Config) -> u8 {
     ));
     logger.info(&age_note(cfg));
 
+    if !platform::is_elevated() {
+        outln!(
+            "Warning: not running as Administrator — Windows temp, Prefetch and"
+        );
+        outln!("crash dumps will be reported as \"access denied\".");
+        logger.info("Not elevated: system locations cannot be cleaned.");
+    }
+
     // 1) Scan and show the plan
     let (reports, totals, recycle_bytes) = scan_all(cfg, &mut logger);
     let scanned_any = reports.iter().any(|r| r.exists) || cfg.empty_recycle_bin;
@@ -295,6 +355,11 @@ fn console_mode(cfg: &Config) -> u8 {
             format_number(files),
             format_size(bytes)
         );
+    }
+    for r in &reports {
+        if r.dirs_unreadable > 0 {
+            outln!("  {}: folder could not be read (access denied)", r.label);
+        }
     }
     if cfg.empty_recycle_bin {
         outln!(
@@ -340,17 +405,24 @@ fn console_mode(cfg: &Config) -> u8 {
     let done = clean_all(cfg, &mut logger);
 
     let mut freed = done.bytes_freed;
+    let mut bin_failed = false;
     if cfg.empty_recycle_bin {
-        // Always call it: the size estimate can read 0 when $Recycle.Bin
-        // is not readable, yet the Shell may still empty it.
-        if platform::empty_recycle_bin() {
-            freed += recycle_bytes;
+        // Always call it: the size estimate can read 0 when $Recycle.Bin is
+        // not readable, yet the Shell may still empty it. The size is
+        // re-queried so the summary reports what was really freed.
+        let (before, after) = platform::empty_recycle_bin();
+        if after < before {
+            freed += before - after;
             logger.info(&format!(
-                "Recycle Bin emptied (about {}).",
-                format_size(recycle_bytes)
+                "Recycle Bin emptied ({} freed).",
+                format_size(before - after)
             ));
+        } else if before > 0 {
+            bin_failed = true;
+            logger.info("Recycle Bin could not be emptied (files in use, or items owned by another user).");
+            outln!("  Recycle Bin   : could not be emptied ({} left)", format_size(after));
         } else {
-            logger.info("Could not empty the Recycle Bin.");
+            logger.info("Recycle Bin was already empty.");
         }
     }
 
@@ -358,14 +430,40 @@ fn console_mode(cfg: &Config) -> u8 {
     outln!("Done:");
     outln!("  Files deleted : {}", format_number(done.files_deleted));
     outln!("  Space freed   : {}", format_size(freed));
-    outln!("  Files skipped : {} (in use or too recent)", format_number(done.files_skipped));
+    outln!(
+        "  Files skipped : {} (in use or too recent)",
+        format_number(done.files_skipped)
+    );
+    if done.files_skipped > 0 {
+        outln!(
+            "    too recent  : {}",
+            format_number(done.skipped_recent)
+        );
+        outln!("    in use      : {}", format_number(done.skipped_in_use));
+        outln!("    access denied: {}", format_number(done.skipped_denied));
+        outln!("    other       : {}", format_number(done.skipped_other));
+        if done.skipped_denied > 0 {
+            outln!("    → run as Administrator to clean those");
+        }
+    }
     outln!("  Folders removed: {}", format_number(done.dirs_removed));
+    if done.dirs_unreadable > 0 {
+        outln!(
+            "  Folders unreadable: {} (access denied)",
+            format_number(done.dirs_unreadable)
+        );
+    }
     logger.info(&format!(
-        "Finished: deleted {} files, freed {}, skipped {}.",
-        done.files_deleted, freed, done.files_skipped
+        "Finished: deleted {} files, freed {}, skipped {} ({} recent, {} in use, {} denied).",
+        done.files_deleted,
+        freed,
+        done.files_skipped,
+        done.skipped_recent,
+        done.skipped_in_use,
+        done.skipped_denied
     ));
 
-    if done.files_skipped > 0 {
+    if done.files_skipped > 0 || bin_failed {
         EXIT_PARTIAL
     } else {
         EXIT_OK

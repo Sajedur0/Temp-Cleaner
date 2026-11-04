@@ -12,8 +12,37 @@ Legend: **Added** · **Changed** · **Fixed** · **Safety** · **Removed**
 
 ## [Unreleased]
 
-Nothing yet — ideas and bug reports are welcome in
-[Issues](https://github.com/Sajedur0/Temp-Cleaner/issues).
+### Fixed
+
+- **Recycle Bin kept reporting a size no matter how often it was emptied.**
+  The size was measured by walking `<drive>:\$Recycle.Bin`, which also counts
+  other accounts' bins and orphaned SID folders the Shell can never empty —
+  and it included removable drives and empty card readers that have no bin at
+  all. It now asks the Shell itself (`SHQueryRecycleBinW`) for the size of
+  each *fixed* drive, empties every drive explicitly in addition to the
+  all-drives call, then re-measures and reports what was genuinely freed.
+- **The summary claimed Recycle Bin space that was never freed.** Emptying
+  was reported as success on nothing but the API's return value; the result
+  is now verified (`before` vs `after`) and a bin that is still full is
+  reported as such (and yields exit code `1`).
+- **Prefetch (and other protected folders) could not be cleaned.** The
+  process never enabled the backup/restore rights its elevated token already
+  holds, so any file whose ACL refused the delete failed instantly. Those
+  privileges are now enabled at startup, blocking attributes are cleared, and
+  a sharing violation is retried a few times instead of giving up at once.
+
+### Added
+
+- Skipped files are now counted **by reason** — too recent, in use, or access
+  denied — and shown in the console summary and the result toast.
+- Folders that cannot even be listed are reported ("could not be read —
+  access denied") instead of silently looking empty.
+- A warning in the confirmation dialog and the console when Temp Cleaner is
+  not running elevated, since that is the usual reason system locations are
+  reported as access denied.
+- Log lines now carry the real OS reason for every file that could not be
+  deleted instead of a generic "in use?".
+- The result toast grew a little to fit the extra detail.
 
 ---
 

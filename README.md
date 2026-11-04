@@ -76,6 +76,9 @@
   (`C:\Windows\Temp` survives; what is inside it does not).
 - **Toast result summary** (bottom-right, auto-dismiss, click to close):
   files deleted, space freed, files skipped.
+- **Honest reporting** — every skipped file is counted by *reason*
+  (too recent / in use / access denied) and the Recycle Bin is re-measured
+  after emptying, so the summary never claims space it did not free.
 - **Full CLI for scripting** — dry runs, category filters, logging and
   meaningful exit codes.
 - **Tiny native binary**, no runtime dependencies. Asks for Administrator
@@ -232,12 +235,30 @@ Add `--log C:\Logs\TempCleaner.log` to keep a history of what was removed.
 | Code | Meaning |
 | --- | --- |
 | `0` | Success — or a dry run, or nothing to do |
-| `1` | Cleaned, but some files were skipped |
+| `1` | Cleaned, but some files were skipped (or the Recycle Bin could not be emptied) |
 | `2` | Usage error (unknown option, bad value) |
 | `3` | Nothing could be scanned |
 
 ## ❓ FAQ / Troubleshooting
 
+- **The Recycle Bin shows a size every time, even right after cleaning?**
+  It used to be measured by walking `C:\$Recycle.Bin`, which also counts the
+  bins of *other* accounts and orphaned folders left by deleted users — space
+  the Shell can never empty, so it kept reappearing. Temp Cleaner now asks
+  the Shell itself (`SHQueryRecycleBin`) for the size of each **fixed** drive,
+  empties every drive explicitly, then re-measures: the summary reports what
+  was really freed, and says so if items are still there (in use, or owned by
+  another account).
+- **Prefetch files never seem to go away?**
+  Windows (the *SysMain* service) rewrites `.pf` records continuously, holds
+  some of them open, and recreates them as soon as the related app launches —
+  so the folder often looks untouched seconds after a clean. Temp Cleaner now
+  enables the backup/restore rights an elevated token already owns, clears
+  blocking attributes, and retries briefly when a file is merely held open.
+  Anything still left is reported with the real reason (`in use` vs
+  `access denied`) in the log and the summary. If you see **access denied**,
+  run as Administrator; if you see **too recent**, use `--min-age 0`; if you
+  would rather leave it alone, use `--skip prefetch`.
 - **Thumbnail cache files are skipped?**
   Explorer keeps `thumbcache_*.db` open while it runs, and locked files are
   skipped by design. Sign out and back in (or restart Explorer) and run again
