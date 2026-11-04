@@ -1,0 +1,17 @@
+[package]
+name = "temp_cleaner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "winnt"] }
+
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
