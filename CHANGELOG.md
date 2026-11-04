@@ -33,6 +33,26 @@ Legend: **Added** · **Changed** · **Fixed** · **Safety** · **Removed**
 
 ### Added
 
+- **More Disk Cleanup locations**, all cleaned in one pass:
+  - `inet-cache` — Temporary Internet Files (`INetCache`, the legacy
+    IE/Edge cache Disk Cleanup clears);
+  - `shader-cache` — DirectX shader cache (`%LOCALAPPDATA%\D3DSCache`);
+  - `service-cache` — Windows service caches: Delivery Optimization,
+    font cache and BranchCache;
+  - `previous-windows` — `C:\Windows.old`, `$WINDOWS.~BT`, `$WINDOWS.~WS`
+    (**opt-in**, irreversible: you lose the rollback to the old Windows).
+- **`--all`** — enable every category, including the two opt-in ones, for a
+  one-shot "clean everything" run.
+- **Guaranteed Administrator rights.** The binary still embeds a
+  `requireAdministrator` manifest, and it now also enables the backup,
+  restore and take-ownership privileges of the elevated token. On top of
+  that, if a double-clicked run somehow starts un-elevated (manifest not
+  applied, UAC off, standard account), the app restarts itself through a UAC
+  prompt instead of silently skipping half the job. Console and `--silent`
+  runs are never relaunched — a scheduled task must not wait for a prompt.
+- The safety gate now allows the per-service cache folders under
+  `%WINDIR%\ServiceProfiles` (font cache, Delivery Optimization, BranchCache)
+  while the rest of the Windows tree stays off-limits.
 - **`--reboot-delete`** — files Windows holds open (Prefetch records, locked
   caches) are queued for deletion at the next boot through
   `MoveFileEx(…, MOVEFILE_DELAY_UNTIL_REBOOT)` instead of being skipped. A

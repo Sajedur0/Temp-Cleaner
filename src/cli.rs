@@ -19,6 +19,15 @@ pub enum Category {
     Thumbnails,
     CrashDumps,
     RecycleBin,
+    /// Temporary Internet Files (the legacy IE / Edge cache that Windows
+    /// Disk Cleanup clears).
+    InetCache,
+    /// DirectX / D3D shader cache.
+    ShaderCache,
+    /// Windows service caches: Delivery Optimization, font cache, BranchCache.
+    ServiceCache,
+    /// `C:\Windows.old` and leftover setup folders (opt-in: irreversible).
+    PreviousWindows,
     WindowsUpdate,
 }
 
@@ -31,6 +40,10 @@ impl Category {
             Category::Thumbnails => "Thumbnail & icon cache",
             Category::CrashDumps => "Crash dumps & error reports",
             Category::RecycleBin => "Recycle Bin",
+            Category::InetCache => "Temporary Internet Files",
+            Category::ShaderCache => "DirectX shader cache",
+            Category::ServiceCache => "Windows service caches",
+            Category::PreviousWindows => "Previous Windows installation",
             Category::WindowsUpdate => "Windows Update cache",
         }
     }
@@ -49,6 +62,18 @@ impl Category {
             "windows-update" | "windowsupdate" | "update" | "wu" => {
                 Some(Category::WindowsUpdate)
             }
+            "inet-cache" | "inetcache" | "internet" | "internet-cache" | "iecache" | "cache" => {
+                Some(Category::InetCache)
+            }
+            "shader-cache" | "shadercache" | "shaders" | "d3dscache" | "dxcache" => {
+                Some(Category::ShaderCache)
+            }
+            "service-cache" | "servicecache" | "services" | "delivery" | "delivery-optimization"
+            | "font-cache" | "fonts" | "branch-cache" | "branchcache" => {
+                Some(Category::ServiceCache)
+            }
+            "previous-windows" | "previouswindows" | "windows-old" | "windowsold"
+            | "old-windows" | "windows.old" => Some(Category::PreviousWindows),
             _ => None,
         }
     }
@@ -73,6 +98,9 @@ pub struct Config {
     pub skip: Vec<Category>,
     /// Also clean the Windows Update download cache (off by default).
     pub include_windows_update: bool,
+    /// Also delete `C:\Windows.old` and leftover setup folders (off by
+    /// default: it removes the ability to roll back to the old Windows).
+    pub include_previous_windows: bool,
     /// Empty the Recycle Bin as part of the run.
     pub empty_recycle_bin: bool,
     /// Only delete files whose last modification is at least this old.
@@ -97,6 +125,7 @@ impl Default for Config {
             only: None,
             skip: Vec::new(),
             include_windows_update: false,
+            include_previous_windows: false,
             empty_recycle_bin: true,
             min_age_hours: DEFAULT_MIN_AGE_HOURS,
             min_age_explicit: false,
@@ -131,8 +160,14 @@ impl Config {
 
     /// Is this category part of the current run?
     pub fn category_enabled(&self, cat: Category) -> bool {
-        // Windows Update cache is opt-in, even if `--only` mentions others.
-        if cat == Category::WindowsUpdate && !self.include_windows_update {
+        // Destructive / risky categories are opt-in, even if `--only`
+        // mentions others.
+        let opt_in = match cat {
+            Category::WindowsUpdate => !self.include_windows_update,
+            Category::PreviousWindows => !self.include_previous_windows,
+            _ => false,
+        };
+        if opt_in {
             // ...unless the user explicitly asked for *only* this category.
             let explicitly_only = matches!(&self.only, Some(list) if list.contains(&cat));
             if !explicitly_only {
@@ -191,7 +226,8 @@ fn parse_category_list(value: &str, flag: &str) -> Result<Vec<Category>, String>
                 return Err(format!(
                     "Unknown category '{part}' in {flag}. Valid categories: \
                      user-temp, system-temp, prefetch, thumbnails, crash-dumps, \
-                     recycle-bin, windows-update"
+                     inet-cache, shader-cache, service-cache, recycle-bin, \
+                     windows-update, previous-windows"
                 ));
             }
         }
@@ -223,6 +259,12 @@ pub fn parse_args(args: &[String]) -> ParseOutcome {
             "--silent" | "-s" => cfg.silent = true,
             "--verbose" | "-v" => cfg.verbose = true,
             "--windows-update" => cfg.include_windows_update = true,
+            "--previous-windows" => cfg.include_previous_windows = true,
+            // One shot: everything, including the opt-in categories.
+            "--all" => {
+                cfg.include_windows_update = true;
+                cfg.include_previous_windows = true;
+            }
             "--no-recycle-bin" => cfg.empty_recycle_bin = false,
             "--min-age" => {
                 let v = match take_value(args, &mut i, inline, "--min-age") {
@@ -309,6 +351,11 @@ OPTIONS:
         --only <LIST>        Only clean these categories (comma separated)
         --skip <LIST>        Exclude these categories (comma separated)
         --windows-update     Also clean the Windows Update download cache
+        --previous-windows   Also delete C:\\Windows.old and leftover setup
+                             folders ($WINDOWS.~BT, $WINDOWS.~WS). Irreversible
+                             (you can no longer roll back to the old Windows).
+        --all                Enable every category, including the two opt-in
+                             ones above. One-shot \"clean everything\" run.
         --no-recycle-bin     Do not empty the Recycle Bin
         --reboot-delete      Files Windows keeps open (Prefetch records, locked
                              caches) are queued for deletion at the next boot
@@ -317,7 +364,8 @@ OPTIONS:
 
 CATEGORIES:
     user-temp, system-temp, prefetch, thumbnails, crash-dumps,
-    recycle-bin, windows-update (opt-in)
+    inet-cache, shader-cache, service-cache, recycle-bin,
+    windows-update (opt-in), previous-windows (opt-in)
 
     Prefetch is a cache Windows rewrites constantly, so the default 24h
     \"keep recent files\" rule does not apply to it. Pass --min-age to
@@ -396,6 +444,48 @@ mod tests {
         match parse(&["--yes", "--only", "windows-update"]) {
             ParseOutcome::Run(c) => assert!(c.category_enabled(Category::WindowsUpdate)),
             _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn previous_windows_is_opt_in() {
+        match parse(&["--yes"]) {
+            ParseOutcome::Run(c) => assert!(!c.category_enabled(Category::PreviousWindows)),
+            _ => panic!("expected Run"),
+        }
+        match parse(&["--yes", "--only", "windows-old"]) {
+            ParseOutcome::Run(c) => assert!(c.category_enabled(Category::PreviousWindows)),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn all_enables_the_opt_in_categories() {
+        match parse(&["--all"]) {
+            ParseOutcome::Run(c) => {
+                assert!(c.category_enabled(Category::WindowsUpdate));
+                assert!(c.category_enabled(Category::PreviousWindows));
+                assert!(c.category_enabled(Category::Prefetch));
+                assert!(c.category_enabled(Category::ServiceCache));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn new_cache_categories_parse() {
+        for name in [
+            "inet-cache",
+            "shader-cache",
+            "d3dscache",
+            "service-cache",
+            "delivery-optimization",
+            "font-cache",
+            "branch-cache",
+            "previous-windows",
+            "windows.old",
+        ] {
+            assert!(Category::parse(name).is_some(), "{name} should parse");
         }
     }
 

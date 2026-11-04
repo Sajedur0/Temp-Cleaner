@@ -33,8 +33,8 @@ use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
 use winapi::um::securitybaseapi::{AdjustTokenPrivileges, GetTokenInformation};
 #[cfg(windows)]
 use winapi::um::shellapi::{
-    SHEmptyRecycleBinW, SHQueryRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
-    SHERB_NOSOUND, SHQUERYRBINFO,
+    ShellExecuteW, SHEmptyRecycleBinW, SHQueryRecycleBinW, SHERB_NOCONFIRMATION,
+    SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHQUERYRBINFO,
 };
 #[cfg(windows)]
 use winapi::um::winbase::{
@@ -149,6 +149,44 @@ pub fn is_elevated() -> bool {
 #[cfg(not(windows))]
 pub fn is_elevated() -> bool {
     true
+}
+
+/// Relaunch ourselves with the `runas` verb, i.e. through a UAC prompt, and
+/// return true if the elevated copy was started (the caller should then
+/// exit).
+///
+/// The embedded manifest already asks for Administrator, so this only fires
+/// when that request was not honoured (a binary built without the manifest,
+/// UAC switched off, or a plain standard account). It is deliberately **not**
+/// used for `--silent` runs: a scheduled task has nobody to answer a UAC
+/// prompt, and blocking on one would hang the task.
+#[cfg(windows)]
+pub fn relaunch_as_admin() -> bool {
+    unsafe {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let file = wide(&exe.to_string_lossy());
+        let verb = wide("runas");
+        // ShellExecute returns a value > 32 when the new process started.
+        // Anything else means failure — including the user cancelling UAC,
+        // in which case we simply carry on un-elevated.
+        ShellExecuteW(
+            null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        ) as isize
+            > 32
+    }
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_as_admin() -> bool {
+    false
 }
 
 /// Clear the read-only attribute so a file can be deleted. Returns true when

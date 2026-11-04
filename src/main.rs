@@ -61,6 +61,14 @@ fn main() -> ExitCode {
             // token already holds but keeps switched off by default.
             platform::enable_cleanup_privileges();
 
+            // Double-clicked, yet not elevated (manifest not applied, UAC
+            // off, standard account): restart through a UAC prompt so the
+            // run really has Administrator power. Console runs are left
+            // alone — a scheduled task must never wait for a prompt.
+            if args.is_empty() && !platform::is_elevated() && platform::relaunch_as_admin() {
+                return ExitCode::from(EXIT_OK);
+            }
+
             // No arguments at all = double-clicked: friendly GUI flow.
             // Any argument = console mode.
             let code = if args.is_empty() {
