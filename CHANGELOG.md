@@ -33,6 +33,20 @@ Legend: **Added** · **Changed** · **Fixed** · **Safety** · **Removed**
 
 ### Added
 
+- **`--reboot-delete`** — files Windows holds open (Prefetch records, locked
+  caches) are queued for deletion at the next boot through
+  `MoveFileEx(…, MOVEFILE_DELAY_UNTIL_REBOOT)` instead of being skipped. A
+  file opened without delete-sharing cannot be deleted by anything while the
+  system is running, so this is the only way to actually remove them. Needs
+  Administrator rights; the space is freed on restart and those files are
+  counted separately (never reported as "freed" before they are gone).
+- **Prefetch is exempt from the default `--min-age` rule.** Windows rewrites
+  `.pf` records on every app launch and during automatic maintenance, so the
+  default "keep the last 24 hours" rule could leave the whole folder behind.
+  An explicit `--min-age` is still honoured, and `--skip prefetch` is
+  unchanged.
+- A hint in the console summary (and the toast) pointing at
+  `--reboot-delete` when files are skipped as "in use".
 - Skipped files are now counted **by reason** — too recent, in use, or access
   denied — and shown in the console summary and the result toast.
 - Folders that cannot even be listed are reported ("could not be read —

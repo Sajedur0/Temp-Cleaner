@@ -37,7 +37,10 @@ use winapi::um::shellapi::{
     SHERB_NOSOUND, SHQUERYRBINFO,
 };
 #[cfg(windows)]
-use winapi::um::winbase::{LookupPrivilegeValueW, DRIVE_FIXED, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+use winapi::um::winbase::{
+    LookupPrivilegeValueW, MoveFileExW, DRIVE_FIXED, MOVEFILE_DELAY_UNTIL_REBOOT,
+    STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+};
 #[cfg(windows)]
 use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
 #[cfg(windows)]
@@ -164,6 +167,37 @@ pub fn clear_readonly_attribute(path: &Path) -> bool {
 
 #[cfg(not(windows))]
 pub fn clear_readonly_attribute(_path: &std::path::Path) -> bool {
+    false
+}
+
+/// Queue a file for deletion at the next system start.
+///
+/// This is the **only** way to remove a file another process holds open
+/// without delete sharing — which is exactly the case for Windows' own
+/// Prefetch records, some thumbnail databases and locked service caches.
+/// `MoveFileEx` never opens the file itself: it only writes the name into
+/// `HKLM\...\Session Manager\PendingFileRenameOperations`, so a sharing
+/// violation cannot stop it. That also means it needs Administrator rights,
+/// and nothing is removed until the machine restarts.
+///
+/// Returns true when the deletion was queued.
+#[cfg(windows)]
+pub fn schedule_delete_on_reboot(path: &Path) -> bool {
+    // MoveFileEx refuses to queue a read-only file, so clear the attribute
+    // first (harmless: we are about to delete it anyway).
+    clear_readonly_attribute(path);
+    unsafe {
+        let wide_path = wide(&path.to_string_lossy());
+        MoveFileExW(
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            MOVEFILE_DELAY_UNTIL_REBOOT,
+        ) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn schedule_delete_on_reboot(_path: &std::path::Path) -> bool {
     false
 }
 

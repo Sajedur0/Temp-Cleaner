@@ -122,6 +122,8 @@ pub struct Report {
     pub skipped_other: u64,
     /// Folders whose contents could not even be listed (access denied).
     pub dirs_unreadable: u64,
+    /// Files locked by Windows that were queued for deletion at next boot.
+    pub scheduled_reboot: u64,
     pub dirs_removed: u64,
 }
 
@@ -137,6 +139,7 @@ pub struct Totals {
     pub skipped_denied: u64,
     pub skipped_other: u64,
     pub dirs_unreadable: u64,
+    pub scheduled_reboot: u64,
     pub dirs_removed: u64,
 }
 
@@ -152,6 +155,7 @@ impl Totals {
         self.skipped_denied += r.skipped_denied;
         self.skipped_other += r.skipped_other;
         self.dirs_unreadable += r.dirs_unreadable;
+        self.scheduled_reboot += r.scheduled_reboot;
         self.dirs_removed += r.dirs_removed;
     }
 }
@@ -433,10 +437,15 @@ pub fn scan_target(target: &Target, min_age: Duration, now: SystemTime) -> Repor
 
 /// Delete everything `scan_target` would count. `log` receives one line per
 /// file that could not be removed (locked, access denied, …).
+///
+/// With `reboot_delete`, a file that cannot be deleted because Windows itself
+/// holds it open is queued for deletion at the next boot instead of being
+/// skipped (see `platform::schedule_delete_on_reboot`).
 pub fn clean_target(
     target: &Target,
     min_age: Duration,
     now: SystemTime,
+    reboot_delete: bool,
     log: &mut dyn FnMut(&str),
 ) -> Report {
     let mut report = base_report(target);
@@ -459,13 +468,23 @@ pub fn clean_target(
                                 report.bytes_freed = meta.len();
                             }
                             Err(e) => {
-                                report.files_skipped = 1;
-                                note_skip(&mut report, classify_error(&e));
-                                log(&format!(
-                                    "Could not delete {} ({})",
-                                    target.path.display(),
-                                    describe_error(&e)
-                                ));
+                                if reboot_delete
+                                    && crate::platform::schedule_delete_on_reboot(&target.path)
+                                {
+                                    report.scheduled_reboot = 1;
+                                    log(&format!(
+                                        "Queued for deletion at next boot: {}",
+                                        target.path.display()
+                                    ));
+                                } else {
+                                    report.files_skipped = 1;
+                                    note_skip(&mut report, classify_error(&e));
+                                    log(&format!(
+                                        "Could not delete {} ({})",
+                                        target.path.display(),
+                                        describe_error(&e)
+                                    ));
+                                }
                             }
                         }
                     } else {
@@ -504,13 +523,21 @@ pub fn clean_target(
                         report.bytes_freed += meta.len();
                     }
                     Err(e) => {
-                        report.files_skipped += 1;
-                        note_skip(&mut report, classify_error(&e));
-                        log(&format!(
-                            "Could not delete {} ({})",
-                            path.display(),
-                            describe_error(&e)
-                        ));
+                        if reboot_delete && crate::platform::schedule_delete_on_reboot(path) {
+                            report.scheduled_reboot += 1;
+                            log(&format!(
+                                "Queued for deletion at next boot: {}",
+                                path.display()
+                            ));
+                        } else {
+                            report.files_skipped += 1;
+                            note_skip(&mut report, classify_error(&e));
+                            log(&format!(
+                                "Could not delete {} ({})",
+                                path.display(),
+                                describe_error(&e)
+                            ));
+                        }
                     }
                 }
             });
@@ -576,7 +603,7 @@ mod tests {
         assert_eq!(scan.bytes_found, 12);
 
         let mut lines = Vec::new();
-        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), &mut |l| {
+        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), false, &mut |l| {
             lines.push(l.to_string())
         });
         assert_eq!(report.files_deleted, 2);
@@ -597,6 +624,7 @@ mod tests {
             &target,
             Duration::from_secs(365 * 24 * 3600), // a year: everything is "recent"
             SystemTime::now(),
+            false,
             &mut |_| {},
         );
         assert_eq!(report.files_deleted, 0);
@@ -619,7 +647,7 @@ mod tests {
                 suffix: ".db".into(),
             },
         );
-        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), &mut |_| {});
+        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), false, &mut |_| {});
         assert_eq!(report.files_deleted, 1);
         assert!(root.join("explorer.exe").exists());
         let _ = fs::remove_dir_all(&root);
@@ -636,7 +664,7 @@ mod tests {
         std::os::windows::fs::symlink_dir(&outside, root.join("linkdir")).unwrap();
 
         let target = target_for(root.clone());
-        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), &mut |_| {});
+        let report = clean_target(&target, Duration::ZERO, SystemTime::now(), false, &mut |_| {});
         // The link itself is removed, the target folder is untouched.
         assert!(outside.join("precious.txt").exists());
         assert_eq!(report.files_deleted, 1);
