@@ -81,7 +81,7 @@ pub fn enable_cleanup_privileges() {
         }
         for name in CLEANUP_PRIVILEGES {
             let mut luid: LUID = std::mem::zeroed();
-            if LookupPrivilegeValueW(null_mut(), wide(name).as_ptr(), &mut luid) == 0 {
+            if LookupPrivilegeValueW(std::ptr::null(), wide(name).as_ptr(), &mut luid) == 0 {
                 continue;
             }
             let mut tp: TOKEN_PRIVILEGES = std::mem::zeroed();
@@ -535,7 +535,7 @@ const EMPTY_FLAGS: DWORD = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOS
 pub fn empty_recycle_bin() -> (u64, u64) {
     let before = recycle_bin_size();
     unsafe {
-        SHEmptyRecycleBinW(null_mut(), null_mut(), EMPTY_FLAGS);
+        SHEmptyRecycleBinW(null_mut(), std::ptr::null(), EMPTY_FLAGS);
         for root in fixed_drive_roots() {
             SHEmptyRecycleBinW(null_mut(), wide(&root).as_ptr(), EMPTY_FLAGS);
         }
