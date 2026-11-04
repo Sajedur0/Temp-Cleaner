@@ -77,6 +77,11 @@ pub struct Config {
     pub empty_recycle_bin: bool,
     /// Only delete files whose last modification is at least this old.
     pub min_age_hours: u64,
+    /// True when the user passed `--min-age` explicitly (rather than relying
+    /// on the default). Some categories opt out of the *default* rule only.
+    pub min_age_explicit: bool,
+    /// Queue files that are locked by Windows for deletion at the next boot.
+    pub reboot_delete: bool,
     /// Append a timestamped log to this file.
     pub log_path: Option<PathBuf>,
     /// Extra console output (every skipped file, every folder).
@@ -94,6 +99,8 @@ impl Default for Config {
             include_windows_update: false,
             empty_recycle_bin: true,
             min_age_hours: DEFAULT_MIN_AGE_HOURS,
+            min_age_explicit: false,
+            reboot_delete: false,
             log_path: None,
             verbose: false,
         }
@@ -104,6 +111,22 @@ impl Config {
     pub fn min_age(&self) -> Duration {
         // min_age_hours is validated during parsing, so this cannot overflow.
         Duration::from_secs(self.min_age_hours.saturating_mul(3600))
+    }
+
+    /// Minimum age that applies to one category.
+    ///
+    /// Prefetch records are a pure cache: Windows rewrites `.pf` files
+    /// constantly (every launch, plus during automatic maintenance), so the
+    /// default "keep the last 24 hours" rule would very often leave the whole
+    /// folder behind. Windows regenerates anything deleted, so the category
+    /// ignores the *default* rule. An explicit `--min-age` is always honoured,
+    /// and `--skip prefetch` keeps it untouched.
+    pub fn min_age_for(&self, cat: Category) -> Duration {
+        if cat == Category::Prefetch && !self.min_age_explicit {
+            Duration::ZERO
+        } else {
+            self.min_age()
+        }
     }
 
     /// Is this category part of the current run?
@@ -207,7 +230,10 @@ pub fn parse_args(args: &[String]) -> ParseOutcome {
                     Err(e) => return ParseOutcome::Error(e),
                 };
                 match v.parse::<u64>() {
-                    Ok(h) if h <= 24 * 365 * 10 => cfg.min_age_hours = h,
+                    Ok(h) if h <= 24 * 365 * 10 => {
+                        cfg.min_age_hours = h;
+                        cfg.min_age_explicit = true;
+                    }
                     _ => {
                         return ParseOutcome::Error(format!(
                             "Invalid --min-age value '{v}' (expected hours, 0 = delete everything)"
@@ -215,6 +241,7 @@ pub fn parse_args(args: &[String]) -> ParseOutcome {
                     }
                 }
             }
+            "--reboot-delete" | "--delete-on-reboot" => cfg.reboot_delete = true,
             "--only" => {
                 let v = match take_value(args, &mut i, inline, "--only") {
                     Ok(v) => v,
@@ -283,17 +310,25 @@ OPTIONS:
         --skip <LIST>        Exclude these categories (comma separated)
         --windows-update     Also clean the Windows Update download cache
         --no-recycle-bin     Do not empty the Recycle Bin
+        --reboot-delete      Files Windows keeps open (Prefetch records, locked
+                             caches) are queued for deletion at the next boot
+                             instead of being skipped. Needs Administrator.
         --log <PATH>         Append a timestamped log to PATH
 
 CATEGORIES:
     user-temp, system-temp, prefetch, thumbnails, crash-dumps,
     recycle-bin, windows-update (opt-in)
 
+    Prefetch is a cache Windows rewrites constantly, so the default 24h
+    \"keep recent files\" rule does not apply to it. Pass --min-age to
+    override, or --skip prefetch to leave it alone.
+
 EXAMPLES:
     TempCleaner.exe --dry-run
     TempCleaner.exe --yes --min-age 0
     TempCleaner.exe --silent --skip prefetch --log C:\\Logs\\clean.log
     TempCleaner.exe --yes --only user-temp,recycle-bin
+    TempCleaner.exe --yes --only prefetch --reboot-delete
 
 EXIT CODES:
     0 = success (or dry run)   1 = cleaned, but some files were skipped

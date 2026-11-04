@@ -94,12 +94,13 @@ fn log_path_for(cfg: &Config) -> Option<PathBuf> {
 fn scan_all(cfg: &Config, logger: &mut Logger) -> (Vec<Report>, Totals, u64) {
     let targets = targets::build_targets(cfg);
     let now = SystemTime::now();
-    let min_age = cfg.min_age();
 
     let mut reports = Vec::new();
     let mut totals = Totals::default();
     for t in &targets {
-        let r = scan_target(t, min_age, now);
+        // Per category: Prefetch is a cache Windows rewrites constantly, so
+        // the default 24h rule does not apply to it (see Config::min_age_for).
+        let r = scan_target(t, cfg.min_age_for(t.category), now);
         if r.exists {
             logger.detail(&format!(
                 "Found {} ({}) in {}",
@@ -130,13 +131,18 @@ fn scan_all(cfg: &Config, logger: &mut Logger) -> (Vec<Report>, Totals, u64) {
 fn clean_all(cfg: &Config, logger: &mut Logger) -> Totals {
     let targets = targets::build_targets(cfg);
     let now = SystemTime::now();
-    let min_age = cfg.min_age();
 
     let mut totals = Totals::default();
     for t in &targets {
         let r = {
             let mut on_log = |line: &str| logger.detail(line);
-            clean_target(t, min_age, now, &mut on_log)
+            clean_target(
+                t,
+                cfg.min_age_for(t.category),
+                now,
+                cfg.reboot_delete,
+                &mut on_log,
+            )
         };
         if r.exists {
             logger.detail(&format!(
@@ -174,14 +180,18 @@ fn by_category(reports: &[Report]) -> Vec<(String, u64, u64)> {
 }
 
 fn age_note(cfg: &Config) -> String {
-    if cfg.min_age_hours == 0 {
+    let mut note = if cfg.min_age_hours == 0 {
         "Files of any age will be deleted.".to_string()
     } else {
         format!(
             "Files modified in the last {}h are kept (use --min-age 0 to remove everything).",
             cfg.min_age_hours
         )
+    };
+    if cfg.category_enabled(Category::Prefetch) && !cfg.min_age_explicit {
+        note.push_str("\nPrefetch is a cache, so this rule does not apply to it.");
     }
+    note
 }
 
 // -------------------------------------------------------------- GUI mode
@@ -291,6 +301,14 @@ fn gui_mode(cfg: &Config) -> u8 {
             format_number(done.skipped_recent)
         ));
     }
+    if done.scheduled_reboot > 0 {
+        summary.push_str(&format!(
+            "\n{} queued for deletion at next boot",
+            format_number(done.scheduled_reboot)
+        ));
+    } else if done.skipped_in_use > 0 {
+        summary.push_str("\nRestart or use --reboot-delete for locked files");
+    }
     if bin_failed {
         summary.push_str("\nRecycle Bin could not be emptied");
     }
@@ -335,6 +353,9 @@ fn console_mode(cfg: &Config) -> u8 {
             "Warning: not running as Administrator — Windows temp, Prefetch and"
         );
         outln!("crash dumps will be reported as \"access denied\".");
+        if cfg.reboot_delete {
+            outln!("--reboot-delete also needs Administrator rights.");
+        }
         logger.info("Not elevated: system locations cannot be cleaned.");
     }
 
@@ -453,14 +474,25 @@ fn console_mode(cfg: &Config) -> u8 {
             format_number(done.dirs_unreadable)
         );
     }
+    if done.scheduled_reboot > 0 {
+        outln!(
+            "  Queued for next boot: {} (deleted by Windows at startup)",
+            format_number(done.scheduled_reboot)
+        );
+    } else if done.skipped_in_use > 0 {
+        outln!("  → {} files are held open by Windows; run again with", format_number(done.skipped_in_use));
+        outln!("    --reboot-delete to remove them at the next startup,");
+        outln!("    or restart the PC and clean while nothing is running.");
+    }
     logger.info(&format!(
-        "Finished: deleted {} files, freed {}, skipped {} ({} recent, {} in use, {} denied).",
+        "Finished: deleted {} files, freed {}, skipped {} ({} recent, {} in use, {} denied), {} queued for next boot.",
         done.files_deleted,
         freed,
         done.files_skipped,
         done.skipped_recent,
         done.skipped_in_use,
-        done.skipped_denied
+        done.skipped_denied,
+        done.scheduled_reboot
     ));
 
     if done.files_skipped > 0 || bin_failed {

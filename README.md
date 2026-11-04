@@ -171,14 +171,21 @@ reports what *would* be freed, so the CLI is safe to explore.
 | `--min-age <HOURS>` | Only delete files not modified for `HOURS` (default: `24`; `0` = everything) |
 | `--only <LIST>` | Only clean these categories (comma separated) |
 | `--skip <LIST>` | Exclude these categories (comma separated) |
-| `--windows-update` | Also clean the Windows Update download cache |
-| `--no-recycle-bin` | Do not empty the Recycle Bin |
-| `--log <PATH>` | Append a timestamped log to `PATH` |
+| `--windows-update`     | Also clean the Windows Update download cache                                |
+| `--no-recycle-bin`     | Do not empty the Recycle Bin                                                |
+| `--reboot-delete`      | Files Windows keeps open (Prefetch records, locked caches) are queued for deletion at the **next boot** instead of being skipped. Needs Administrator |
+| `--log <PATH>`         | Append a timestamped log to `PATH`                                          |
 
 Every option also accepts the `--flag=value` form, e.g. `--min-age=48`.
 
 **Categories:** `user-temp`, `system-temp`, `prefetch`, `thumbnails`,
 `crash-dumps`, `recycle-bin`, `windows-update` (opt-in).
+
+> **Prefetch and `--min-age`:** Windows rewrites `.pf` records constantly
+> (on every app launch and during automatic maintenance), so the default
+> "keep the last 24 hours" rule would usually leave the folder untouched.
+> Prefetch therefore ignores the *default* rule; pass `--min-age` to override
+> it, or `--skip prefetch` to leave the folder alone.
 
 ## 💡 Examples
 
@@ -189,6 +196,7 @@ TempCleaner.exe --yes --min-age 0                  # clean everything, any age
 TempCleaner.exe --yes --only user-temp,recycle-bin # just these two categories
 TempCleaner.exe --yes --skip prefetch,thumbnails   # everything except these
 TempCleaner.exe --silent --skip prefetch --log C:\Logs\clean.log
+TempCleaner.exe --yes --only prefetch --reboot-delete   # clear locked records
 ```
 
 ## 🔒 Safety First
@@ -199,7 +207,9 @@ Temp Cleaner is deliberately conservative for a tool that deletes files:
    nothing without an explicit `--yes` / `--silent`.
 2. **Recent files survive** — anything modified within the last 24 hours
    (the default `--min-age`) is kept, so running apps and in-progress
-   installers are not disturbed.
+   installers are not disturbed. The one exception is **Prefetch**, a pure
+   cache that Windows rewrites constantly (see
+   [Usage](#-usage)); pass `--min-age` to override this.
 3. **In-use files are skipped**, never force-deleted.
 4. **Links are never followed** — symlinks and junctions are removed as links
    only.
@@ -250,15 +260,23 @@ Add `--log C:\Logs\TempCleaner.log` to keep a history of what was removed.
   was really freed, and says so if items are still there (in use, or owned by
   another account).
 - **Prefetch files never seem to go away?**
-  Windows (the *SysMain* service) rewrites `.pf` records continuously, holds
-  some of them open, and recreates them as soon as the related app launches —
-  so the folder often looks untouched seconds after a clean. Temp Cleaner now
-  enables the backup/restore rights an elevated token already owns, clears
-  blocking attributes, and retries briefly when a file is merely held open.
-  Anything still left is reported with the real reason (`in use` vs
-  `access denied`) in the log and the summary. If you see **access denied**,
-  run as Administrator; if you see **too recent**, use `--min-age 0`; if you
-  would rather leave it alone, use `--skip prefetch`.
+  Two very different things can look identical here, so Temp Cleaner tells
+  you which one it is:
+  - **"recent"** — Windows rewrites `.pf` records constantly (every app
+    launch, plus during automatic maintenance), so *all* of them could be
+    under 24 hours old and the `--min-age` rule keeps them. Prefetch now
+    ignores the *default* rule, so this should no longer happen; `--min-age`
+    is still honoured when you pass it explicitly.
+  - **"in use"** — Windows itself holds some records open, and a file opened
+    without delete-sharing **cannot be deleted by anything** while the system
+    is running. Reboot and clean early in the session, or use
+    **`--reboot-delete`**: those files are queued in
+    `PendingFileRenameOperations` and Windows removes them at the next
+    startup (the same mechanism installers use to replace in-use files). It
+    needs Administrator rights and the space is only freed after the restart.
+  - **"access denied"** — the app is not elevated; right-click →
+    *Run as administrator*.
+  Then Windows rebuilds prefetch data automatically, as it always does.
 - **Thumbnail cache files are skipped?**
   Explorer keeps `thumbcache_*.db` open while it runs, and locked files are
   skipped by design. Sign out and back in (or restart Explorer) and run again
