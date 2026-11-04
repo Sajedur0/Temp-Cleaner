@@ -15,19 +15,19 @@ use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
 #[cfg(windows)]
 use winapi::shared::windef::{HWND, RECT};
 #[cfg(windows)]
-use winapi::um::fileapi::CreateFileW;
+use winapi::um::fileapi::{CreateFileW, GetLogicalDrives, OPEN_EXISTING};
 #[cfg(windows)]
 use winapi::um::handleapi::INVALID_HANDLE_VALUE;
 #[cfg(windows)]
 use winapi::um::libloaderapi::GetModuleHandleW;
 #[cfg(windows)]
-use winapi::um::processenv::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+use winapi::um::processenv::{GetStdHandle, SetStdHandle};
 #[cfg(windows)]
 use winapi::um::shellapi::{
     SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
 };
 #[cfg(windows)]
-use winapi::um::winbase::{GetLogicalDrives, OPEN_EXISTING};
+use winapi::um::winbase::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 #[cfg(windows)]
 use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
 #[cfg(windows)]
@@ -135,7 +135,7 @@ const MARGIN: i32 = 12;
 static TOAST_STATE: OnceLock<(String, bool)> = OnceLock::new();
 
 #[cfg(windows)]
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, _wp: WPARAM, _lp: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
