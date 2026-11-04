@@ -218,6 +218,9 @@ pub fn is_safe_target(path: &Path) -> bool {
                 "minidump",
                 "softwaredistribution",
                 "memory.dmp",
+                // Per-service cache folders (font cache, Delivery
+                // Optimization, BranchCache) live under ServiceProfiles.
+                "serviceprofiles",
             ];
             normals.len() >= 2 && ALLOWED.contains(&normals[1].as_str())
         }
@@ -697,5 +700,21 @@ mod tests {
         assert!(is_safe_target(Path::new(
             r"C:\ProgramData\Microsoft\Windows\WER\ReportArchive"
         )));
+        // New Disk Cleanup style locations:
+        assert!(is_safe_target(Path::new(
+            r"C:\Windows\ServiceProfiles\LocalService\AppData\Local\FontCache"
+        )));
+        assert!(is_safe_target(Path::new(
+            r"C:\Windows\SoftwareDistribution\DeliveryOptimization"
+        )));
+        assert!(is_safe_target(Path::new(r"C:\Windows.old")));
+        assert!(is_safe_target(Path::new(r"C:\Windows.old\Users")));
+        assert!(is_safe_target(Path::new(
+            r"C:\Users\me\AppData\Local\Microsoft\Windows\INetCache"
+        )));
+        assert!(is_safe_target(Path::new(r"C:\Users\me\AppData\Local\D3DSCache")));
+        // …but the rest of the Windows folder is still off-limits.
+        assert!(!is_safe_target(Path::new(r"C:\Windows\Panther")));
+        assert!(!is_safe_target(Path::new(r"C:\Windows\System32\config")));
     }
 }

@@ -94,10 +94,18 @@
 | Thumbnail & icon cache | `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db` and `iconcache_*.db`, plus `%LOCALAPPDATA%\IconCache.db` | `thumbnails` |
 | Crash dumps | `%LOCALAPPDATA%\CrashDumps`, `%WINDIR%\Minidump`, `%WINDIR%\MEMORY.DMP`, Windows Error Reporting archives (`%ProgramData%\Microsoft\Windows\WER\…`) | `crash-dumps` |
 | Recycle Bin | All drives (via the Windows Shell API) | `recycle-bin` |
+| Temporary Internet Files | `%LOCALAPPDATA%\Microsoft\Windows\INetCache` and `…\Temporary Internet Files` (the IE / legacy-Edge cache Disk Cleanup clears) | `inet-cache` |
+| DirectX shader cache | `%LOCALAPPDATA%\D3DSCache` | `shader-cache` |
+| Windows service caches | `%WINDIR%\SoftwareDistribution\DeliveryOptimization`, Delivery Optimization under `NetworkService`, font cache under `LocalService`, BranchCache (`PeerDistRepub`) | `service-cache` |
+| Previous Windows installation | `C:\Windows.old`, `C:\$WINDOWS.~BT`, `C:\$WINDOWS.~WS` — **opt-in** (`--previous-windows`) | `previous-windows` |
 | Windows Update cache | `%WINDIR%\SoftwareDistribution\Download` — **opt-in** (`--windows-update`) | `windows-update` |
 
-Browser caches, downloads, documents and any other personal files are
-**intentionally never touched**.
+Browser profile caches (Chrome / Edge / Firefox), downloads, documents and
+any other personal files are **intentionally never touched**.
+
+> Everything listed above is cleaned in **one pass**: double-click, press
+> **Yes**, done. In a console run add `--all` to include the two opt-in
+> categories as well.
 
 ## ⚡ Quick Start
 
@@ -108,7 +116,10 @@ TempCleaner.exe --dry-run
 # 2. Happy with the list? Clean it (keeps files younger than 24h)
 TempCleaner.exe --yes
 
-# 3. Or just double-click TempCleaner.exe and press Yes in the dialog
+# 3. Everything at once, including the opt-in categories
+TempCleaner.exe --yes --all
+
+# 4. Or just double-click TempCleaner.exe and press Yes in the dialog
 ```
 
 ## ⬇️ Download & Install
@@ -172,6 +183,8 @@ reports what *would* be freed, so the CLI is safe to explore.
 | `--only <LIST>` | Only clean these categories (comma separated) |
 | `--skip <LIST>` | Exclude these categories (comma separated) |
 | `--windows-update`     | Also clean the Windows Update download cache                                |
+| `--previous-windows`   | Also delete `C:\Windows.old` and leftover setup folders. **Irreversible** — you can no longer roll back to the old Windows |
+| `--all`                | Enable **every** category, including the two opt-in ones — a one-shot "clean everything" run |
 | `--no-recycle-bin`     | Do not empty the Recycle Bin                                                |
 | `--reboot-delete`      | Files Windows keeps open (Prefetch records, locked caches) are queued for deletion at the **next boot** instead of being skipped. Needs Administrator |
 | `--log <PATH>`         | Append a timestamped log to `PATH`                                          |
@@ -179,7 +192,8 @@ reports what *would* be freed, so the CLI is safe to explore.
 Every option also accepts the `--flag=value` form, e.g. `--min-age=48`.
 
 **Categories:** `user-temp`, `system-temp`, `prefetch`, `thumbnails`,
-`crash-dumps`, `recycle-bin`, `windows-update` (opt-in).
+`crash-dumps`, `inet-cache`, `shader-cache`, `service-cache`,
+`recycle-bin`, `windows-update` (opt-in), `previous-windows` (opt-in).
 
 > **Prefetch and `--min-age`:** Windows rewrites `.pf` records constantly
 > (on every app launch and during automatic maintenance), so the default
@@ -290,8 +304,19 @@ Add `--log C:\Logs\TempCleaner.log` to keep a history of what was removed.
 - **Windows Update cache is opt-in** (`--windows-update`) because Windows
   Update may be mid-download. Only clean it when no update is in progress.
 - **No Administrator prompt, or “access denied”?**
-  The `.exe` must run elevated to clean `C:\Windows\Temp` and `Prefetch`.
-  Approve the UAC prompt, or right-click → *Run as administrator*.
+  The `.exe` must run elevated to clean `C:\Windows\Temp`, `Prefetch` and the
+  other system locations. Approve the UAC prompt, or right-click → *Run as
+  administrator*. If the embedded manifest was somehow not applied (a debug
+  build, UAC switched off, a standard account), double-clicking the app now
+  restarts itself through a UAC prompt instead of cleaning nothing.
+- **Is `C:\Windows.old` deleted?**
+  Only with `--previous-windows` (or `--all`) — it is irreversible, because
+  you lose the ability to roll back to the previous Windows. The folder
+  itself is kept, its contents are removed.
+- **Does it clean browser caches (Chrome / Edge / Firefox)?**
+  No. Only the Windows Internet cache (`INetCache`, the legacy IE/Edge cache
+  that Disk Cleanup clears) is touched; browser profiles, cookies and
+  passwords are never read or deleted.
 - **Does it delete personal files or browser data?**
   No. Only the system and app temp/cache locations listed above are touched.
 - **Does it phone home or collect telemetry?**

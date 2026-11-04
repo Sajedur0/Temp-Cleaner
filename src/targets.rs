@@ -128,6 +128,100 @@ pub fn build_targets(cfg: &Config) -> Vec<Target> {
         }
     }
 
+    if cfg.category_enabled(Category::InetCache) {
+        if let Some(local) = &local {
+            let windows_cache = local.join("Microsoft").join("Windows");
+            targets.push(Target::new(
+                "Internet cache (INetCache)",
+                Category::InetCache,
+                windows_cache.join("INetCache"),
+                CleanMode::AllContents,
+            ));
+            targets.push(Target::new(
+                "Temporary Internet Files (legacy)",
+                Category::InetCache,
+                windows_cache.join("Temporary Internet Files"),
+                CleanMode::AllContents,
+            ));
+        }
+    }
+
+    if cfg.category_enabled(Category::ShaderCache) {
+        if let Some(local) = &local {
+            targets.push(Target::new(
+                "DirectX shader cache",
+                Category::ShaderCache,
+                local.join("D3DSCache"),
+                CleanMode::AllContents,
+            ));
+        }
+    }
+
+    if cfg.category_enabled(Category::ServiceCache) {
+        // Windows Update / Store peer-to-peer cache.
+        targets.push(Target::new(
+            "Delivery Optimization cache",
+            Category::ServiceCache,
+            windir
+                .join("SoftwareDistribution")
+                .join("DeliveryOptimization"),
+            CleanMode::AllContents,
+        ));
+        let service_profiles = windir.join("ServiceProfiles");
+        targets.push(Target::new(
+            "Delivery Optimization cache (service)",
+            Category::ServiceCache,
+            service_profiles
+                .join("NetworkService")
+                .join("AppData")
+                .join("Local")
+                .join("Microsoft")
+                .join("Windows")
+                .join("DeliveryOptimization"),
+            CleanMode::AllContents,
+        ));
+        // Rebuilt automatically by the FontCache service.
+        targets.push(Target::new(
+            "Font cache",
+            Category::ServiceCache,
+            service_profiles
+                .join("LocalService")
+                .join("AppData")
+                .join("Local")
+                .join("FontCache"),
+            CleanMode::AllContents,
+        ));
+        // BranchCache local cache (only present when the feature is on).
+        targets.push(Target::new(
+            "BranchCache",
+            Category::ServiceCache,
+            service_profiles
+                .join("NetworkService")
+                .join("AppData")
+                .join("Local")
+                .join("PeerDistRepub"),
+            CleanMode::AllContents,
+        ));
+    }
+
+    if cfg.category_enabled(Category::PreviousWindows) {
+        // Everything Disk Cleanup's "Previous Windows installation(s)"
+        // handler removes. Opt-in: it is irreversible.
+        // %WINDIR% is `C:\Windows`, so its parent is the system drive root.
+        let system_drive = match windir.parent() {
+            Some(root) => root.to_path_buf(),
+            None => PathBuf::from("C:\\"),
+        };
+        for name in ["Windows.old", "$WINDOWS.~BT", "$WINDOWS.~WS"] {
+            targets.push(Target::new(
+                name,
+                Category::PreviousWindows,
+                system_drive.join(name),
+                CleanMode::AllContents,
+            ));
+        }
+    }
+
     if cfg.category_enabled(Category::WindowsUpdate) {
         targets.push(Target::new(
             "Windows Update downloads",
