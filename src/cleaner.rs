@@ -47,6 +47,61 @@ impl Target {
     }
 }
 
+/// Why a file was kept instead of deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipKind {
+    /// Newer than `--min-age`: kept on purpose, not a failure.
+    Recent,
+    /// Another process holds the file open.
+    InUse,
+    /// Permissions refused the delete (usually: not running elevated).
+    Denied,
+    /// Anything else.
+    Other,
+}
+
+// Windows error codes worth naming; `raw_os_error()` returns errno elsewhere,
+// where these numbers simply never match and the `ErrorKind` fallback below
+// takes over.
+const ERROR_ACCESS_DENIED: i32 = 5;
+const ERROR_WRITE_PROTECT: i32 = 19;
+const ERROR_SHARING_VIOLATION: i32 = 32;
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+/// Classify a failed delete so the summary can say *why* files were kept.
+pub fn classify_error(err: &std::io::Error) -> SkipKind {
+    match err.raw_os_error() {
+        Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION) => SkipKind::InUse,
+        Some(ERROR_ACCESS_DENIED) | Some(ERROR_WRITE_PROTECT) => SkipKind::Denied,
+        _ => match err.kind() {
+            std::io::ErrorKind::PermissionDenied => SkipKind::Denied,
+            _ => SkipKind::Other,
+        },
+    }
+}
+
+/// A short, human reason for a skipped file (logs and the final summary).
+pub fn describe_error(err: &std::io::Error) -> String {
+    match classify_error(err) {
+        SkipKind::InUse => "in use by another process".to_string(),
+        SkipKind::Denied => "access denied (not running as Administrator?)".to_string(),
+        SkipKind::Recent | SkipKind::Other => err.to_string(),
+    }
+}
+
+fn is_transient(err: &std::io::Error) -> bool {
+    classify_error(err) == SkipKind::InUse
+}
+
+fn note_skip(report: &mut Report, kind: SkipKind) {
+    match kind {
+        SkipKind::Recent => report.skipped_recent += 1,
+        SkipKind::InUse => report.skipped_in_use += 1,
+        SkipKind::Denied => report.skipped_denied += 1,
+        SkipKind::Other => report.skipped_other += 1,
+    }
+}
+
 /// Result of scanning (and optionally cleaning) one target.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -60,6 +115,13 @@ pub struct Report {
     pub bytes_freed: u64,
     /// Files that matched but were kept (too recent or locked / in use).
     pub files_skipped: u64,
+    /// `files_skipped` broken down by reason.
+    pub skipped_recent: u64,
+    pub skipped_in_use: u64,
+    pub skipped_denied: u64,
+    pub skipped_other: u64,
+    /// Folders whose contents could not even be listed (access denied).
+    pub dirs_unreadable: u64,
     pub dirs_removed: u64,
 }
 
@@ -70,6 +132,11 @@ pub struct Totals {
     pub files_deleted: u64,
     pub bytes_freed: u64,
     pub files_skipped: u64,
+    pub skipped_recent: u64,
+    pub skipped_in_use: u64,
+    pub skipped_denied: u64,
+    pub skipped_other: u64,
+    pub dirs_unreadable: u64,
     pub dirs_removed: u64,
 }
 
@@ -80,6 +147,11 @@ impl Totals {
         self.files_deleted += r.files_deleted;
         self.bytes_freed += r.bytes_freed;
         self.files_skipped += r.files_skipped;
+        self.skipped_recent += r.skipped_recent;
+        self.skipped_in_use += r.skipped_in_use;
+        self.skipped_denied += r.skipped_denied;
+        self.skipped_other += r.skipped_other;
+        self.dirs_unreadable += r.dirs_unreadable;
         self.dirs_removed += r.dirs_removed;
     }
 }
@@ -194,10 +266,10 @@ fn name_matches(file_name: &str, mode: &CleanMode) -> bool {
     }
 }
 
-/// Try hard to delete one file: normal delete, then clear the read-only
-/// attribute and try again. Returns false for locked / in-use files.
-pub fn remove_file_force(path: &Path) -> bool {
-    if fs::remove_file(path).is_ok() {
+/// Drop the read-only attribute (Windows: via the file attributes API,
+/// elsewhere via `std`) so a delete can succeed.
+fn clear_readonly(path: &Path) -> bool {
+    if crate::platform::clear_readonly_attribute(path) {
         return true;
     }
     if let Ok(meta) = fs::metadata(path) {
@@ -205,30 +277,77 @@ pub fn remove_file_force(path: &Path) -> bool {
         if perm.readonly() {
             #[allow(clippy::permissions_set_readonly_false)]
             perm.set_readonly(false);
-            let _ = fs::set_permissions(path, perm);
-            return fs::remove_file(path).is_ok();
+            return fs::set_permissions(path, perm).is_ok();
         }
     }
     false
 }
 
+/// Try hard to delete one file: normal delete, then clear the read-only
+/// attribute and try again, then retry briefly while the file is merely held
+/// open. Returns the last error when every attempt failed.
+pub fn remove_file_force(path: &Path) -> std::io::Result<()> {
+    let first = match fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    // A read-only file can never be deleted; drop the attribute and retry.
+    if clear_readonly(path) && fs::remove_file(path).is_ok() {
+        return Ok(());
+    }
+
+    // Windows rewrites some of these files continuously (prefetch records,
+    // the search index, virus scanners…), so a sharing violation is often
+    // gone a moment later. Retry briefly instead of giving up instantly —
+    // this is what makes stubborn system folders such as Prefetch clear.
+    let mut last = first;
+    if !is_transient(&last) {
+        return Err(last);
+    }
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(120));
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = e;
+                if !is_transient(&last) {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
 /// Delete a symlink / junction *link itself* without ever following it.
-fn remove_link(path: &Path, meta: &fs::Metadata) -> bool {
+fn remove_link(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
     // A link pointing at a directory needs remove_dir on Windows.
     if meta.file_type().is_symlink() {
-        if fs::remove_file(path).is_ok() {
-            return true;
-        }
-        return fs::remove_dir(path).is_ok();
+        return fs::remove_file(path).or_else(|e| match fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(e),
+        });
     }
     remove_file_force(path)
 }
 
 struct Walker {
     dirs_preorder: Vec<PathBuf>,
+    /// Folders we could not list, with the reason. Previously these were
+    /// skipped silently, which made an unreadable folder look like an empty
+    /// one.
+    unreadable: Vec<(PathBuf, String)>,
 }
 
 impl Walker {
+    fn new() -> Walker {
+        Walker {
+            dirs_preorder: Vec::new(),
+            unreadable: Vec::new(),
+        }
+    }
+
     /// Walk `root`, calling `on_file` for every file / symlink (never
     /// descending into symlinks). Records directories in pre-order so the
     /// caller can remove them in reverse (children before parents).
@@ -238,7 +357,10 @@ impl Walker {
         while let Some(dir) = stack.pop() {
             let entries = match fs::read_dir(&dir) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    self.unreadable.push((dir.clone(), describe_error(&e)));
+                    continue;
+                }
             };
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -290,9 +412,7 @@ pub fn scan_target(target: &Target, min_age: Duration, now: SystemTime) -> Repor
                 return report;
             }
             report.exists = true;
-            let mut walker = Walker {
-                dirs_preorder: Vec::new(),
-            };
+            let mut walker = Walker::new();
             walker.run(&target.path, &mut |path, meta| {
                 let name = path
                     .file_name()
@@ -305,6 +425,7 @@ pub fn scan_target(target: &Target, min_age: Duration, now: SystemTime) -> Repor
                     report.bytes_found += meta.len();
                 }
             });
+            report.dirs_unreadable = walker.unreadable.len() as u64;
         }
     }
     report
@@ -332,18 +453,24 @@ pub fn clean_target(
                     if is_old_enough(meta.modified().ok(), min_age, now) {
                         report.files_found = 1;
                         report.bytes_found = meta.len();
-                        if remove_link(&target.path, &meta) {
-                            report.files_deleted = 1;
-                            report.bytes_freed = meta.len();
-                        } else {
-                            report.files_skipped = 1;
-                            log(&format!(
-                                "Could not delete {} (in use?)",
-                                target.path.display()
-                            ));
+                        match remove_link(&target.path, &meta) {
+                            Ok(()) => {
+                                report.files_deleted = 1;
+                                report.bytes_freed = meta.len();
+                            }
+                            Err(e) => {
+                                report.files_skipped = 1;
+                                note_skip(&mut report, classify_error(&e));
+                                log(&format!(
+                                    "Could not delete {} ({})",
+                                    target.path.display(),
+                                    describe_error(&e)
+                                ));
+                            }
                         }
                     } else {
                         report.files_skipped = 1;
+                        note_skip(&mut report, SkipKind::Recent);
                     }
                 }
             }
@@ -354,9 +481,7 @@ pub fn clean_target(
             }
             report.exists = true;
             let remove_empty_dirs = matches!(target.mode, CleanMode::AllContents);
-            let mut walker = Walker {
-                dirs_preorder: Vec::new(),
-            };
+            let mut walker = Walker::new();
             let mode = target.mode.clone();
             walker.run(&target.path, &mut |path, meta| {
                 let name = path
@@ -368,18 +493,32 @@ pub fn clean_target(
                 }
                 if !is_old_enough(meta.modified().ok(), min_age, now) {
                     report.files_skipped += 1;
+                    note_skip(&mut report, SkipKind::Recent);
                     return;
                 }
                 report.files_found += 1;
                 report.bytes_found += meta.len();
-                if remove_link(path, meta) {
-                    report.files_deleted += 1;
-                    report.bytes_freed += meta.len();
-                } else {
-                    report.files_skipped += 1;
-                    log(&format!("Could not delete {} (in use?)", path.display()));
+                match remove_link(path, meta) {
+                    Ok(()) => {
+                        report.files_deleted += 1;
+                        report.bytes_freed += meta.len();
+                    }
+                    Err(e) => {
+                        report.files_skipped += 1;
+                        note_skip(&mut report, classify_error(&e));
+                        log(&format!(
+                            "Could not delete {} ({})",
+                            path.display(),
+                            describe_error(&e)
+                        ));
+                    }
                 }
             });
+
+            for (dir, why) in &walker.unreadable {
+                report.dirs_unreadable += 1;
+                log(&format!("Could not read folder {} ({})", dir.display(), why));
+            }
 
             if remove_empty_dirs {
                 // Reverse pre-order: children before parents. The target

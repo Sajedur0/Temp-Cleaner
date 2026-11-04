@@ -11,35 +11,160 @@ use std::ptr::null_mut;
 use std::sync::OnceLock;
 
 #[cfg(windows)]
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
+use winapi::shared::minwindef::{DWORD, LPARAM, LRESULT, UINT, WPARAM};
+#[cfg(windows)]
+use winapi::shared::ntdef::LUID;
 #[cfg(windows)]
 use winapi::shared::windef::{HWND, RECT};
 #[cfg(windows)]
-use winapi::um::fileapi::{CreateFileW, GetLogicalDrives, OPEN_EXISTING};
+use winapi::um::fileapi::{
+    CreateFileW, GetDriveTypeW, GetFileAttributesW, GetLogicalDrives, SetFileAttributesW,
+    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
+};
 #[cfg(windows)]
-use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use winapi::um::libloaderapi::GetModuleHandleW;
 #[cfg(windows)]
 use winapi::um::processenv::{GetStdHandle, SetStdHandle};
 #[cfg(windows)]
+use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+#[cfg(windows)]
+use winapi::um::securitybaseapi::{AdjustTokenPrivileges, GetTokenInformation};
+#[cfg(windows)]
 use winapi::um::shellapi::{
-    SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND,
+    SHEmptyRecycleBinW, SHQueryRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI,
+    SHERB_NOSOUND, SHQUERYRBINFO,
 };
 #[cfg(windows)]
-use winapi::um::winbase::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+use winapi::um::winbase::{LookupPrivilegeValueW, DRIVE_FIXED, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 #[cfg(windows)]
 use winapi::um::wincon::{AttachConsole, ATTACH_PARENT_PROCESS};
 #[cfg(windows)]
 use winapi::um::wingdi::*;
 #[cfg(windows)]
-use winapi::um::winnt::{FILE_SHARE_WRITE, GENERIC_WRITE};
+use winapi::um::winnt::{
+    FILE_ATTRIBUTE_READONLY, FILE_SHARE_WRITE, GENERIC_WRITE, HANDLE, LUID_AND_ATTRIBUTES,
+    SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
+    TOKEN_PRIVILEGES, TOKEN_QUERY, TokenElevation, TokenElevationType, TokenElevationTypeDefault,
+};
 #[cfg(windows)]
 use winapi::um::winuser::*;
 
 #[cfg(windows)]
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+// ------------------------------------------------------- privileges / admin
+
+/// Privileges that let an elevated process delete files whose ACL would
+/// otherwise refuse it (classic backup/cleanup technique). They are only
+/// granted if the token already holds them — this never escalates rights, it
+/// only *enables* ones the user already has.
+#[cfg(windows)]
+const CLEANUP_PRIVILEGES: [&str; 3] = [
+    "SeBackupPrivilege",
+    "SeRestorePrivilege",
+    "SeTakeOwnershipPrivilege",
+];
+
+/// Enable the privileges above for this process. Best effort: silently does
+/// nothing when the process is not elevated (a limited token does not hold
+/// them at all) or when the API calls fail.
+#[cfg(windows)]
+pub fn enable_cleanup_privileges() {
+    unsafe {
+        let mut token: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token) == 0 {
+            return;
+        }
+        for name in CLEANUP_PRIVILEGES {
+            let mut luid: LUID = std::mem::zeroed();
+            if LookupPrivilegeValueW(std::ptr::null(), wide(name).as_ptr(), &mut luid) == 0 {
+                continue;
+            }
+            let mut tp: TOKEN_PRIVILEGES = std::mem::zeroed();
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0] = LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            };
+            AdjustTokenPrivileges(
+                token,
+                0,
+                &mut tp,
+                std::mem::size_of::<TOKEN_PRIVILEGES>() as DWORD,
+                null_mut(),
+                null_mut(),
+            );
+        }
+        CloseHandle(token);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn enable_cleanup_privileges() {}
+
+/// Is this process running with a full administrator token? Used only to warn
+/// the user: without elevation `C:\Windows\Temp` and `C:\Windows\Prefetch`
+/// cannot be cleaned and every file there is reported as "access denied".
+#[cfg(windows)]
+pub fn is_elevated() -> bool {
+    unsafe {
+        let mut token: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        // TokenIsElevated is 0 when UAC is off (there is no split token to
+        // elevate), so a "default" elevation type counts as running with full
+        // rights too.
+        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+        let mut returned: DWORD = 0;
+        let queried = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION>() as DWORD,
+            &mut returned,
+        );
+        let mut kind: TOKEN_ELEVATION_TYPE = 0;
+        let mut kind_len: DWORD = 0;
+        let kind_queried = GetTokenInformation(
+            token,
+            TokenElevationType,
+            &mut kind as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as DWORD,
+            &mut kind_len,
+        );
+        CloseHandle(token);
+        (queried != 0 && elevation.TokenIsElevated != 0)
+            || (kind_queried != 0 && kind == TokenElevationTypeDefault)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_elevated() -> bool {
+    true
+}
+
+/// Clear the read-only attribute so a file can be deleted. Returns true when
+/// an attribute was actually changed.
+#[cfg(windows)]
+pub fn clear_readonly_attribute(path: &Path) -> bool {
+    unsafe {
+        let wide_path = wide(&path.to_string_lossy());
+        let attrs = GetFileAttributesW(wide_path.as_ptr());
+        if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_READONLY == 0 {
+            return false;
+        }
+        SetFileAttributesW(wide_path.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn clear_readonly_attribute(_path: &std::path::Path) -> bool {
+    false
 }
 
 // ------------------------------------------------------------ console I/O
@@ -125,9 +250,9 @@ pub fn info_box(_title: &str, text: &str) {
 #[cfg(windows)]
 const TOAST_DURATION_MS: u32 = 4500;
 #[cfg(windows)]
-const TOAST_W: i32 = 340;
+const TOAST_W: i32 = 360;
 #[cfg(windows)]
-const TOAST_H: i32 = 112;
+const TOAST_H: i32 = 142;
 #[cfg(windows)]
 const MARGIN: i32 = 12;
 
@@ -296,10 +421,48 @@ pub fn show_toast(text: &str, _success: bool) {
 
 // ------------------------------------------------------------ recycle bin
 
-/// Best-effort size estimate of all Recycle Bins on fixed drives
-/// (sums the real files under `<drive>:\$Recycle.Bin`).
+/// Root paths (`C:\`) of every *fixed* drive on this machine.
+///
+/// Only fixed drives take part in the Recycle Bin work. Counting removable
+/// drives and empty card readers was the old behaviour and it produced a
+/// phantom "Recycle Bin" size that could never be emptied (a CD-ROM drive has
+/// no bin at all, and `SHEmptyRecycleBin` cannot clear one).
 #[cfg(windows)]
-pub fn recycle_bin_size() -> u64 {
+fn fixed_drive_roots() -> Vec<String> {
+    let mut roots = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    for i in 0..26u32 {
+        if mask & (1u32 << i) == 0 {
+            continue;
+        }
+        let root = format!("{}:\\", (b'A' + i as u8) as char);
+        let wide_root = wide(&root);
+        let kind = unsafe { GetDriveTypeW(wide_root.as_ptr()) };
+        if kind == DRIVE_FIXED {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// Size of one drive's Recycle Bin, as reported by the Shell itself — the
+/// same number Explorer shows. Returns `None` when the Shell call fails.
+#[cfg(windows)]
+fn query_recycle_bin(root: &str) -> Option<u64> {
+    unsafe {
+        let mut info: SHQUERYRBINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<SHQUERYRBINFO>() as DWORD;
+        if SHQueryRecycleBinW(wide(root).as_ptr(), &mut info) < 0 {
+            return None;
+        }
+        Some(if info.i64Size > 0 { info.i64Size as u64 } else { 0 })
+    }
+}
+
+/// Fallback: sum the real files under `<drive>:\$Recycle.Bin`, used only when
+/// the Shell refuses to answer (it needs a logged-on interactive session).
+#[cfg(windows)]
+fn recycle_bin_size_by_walking() -> u64 {
     fn dir_size(path: &Path) -> u64 {
         let mut total = 0u64;
         let mut stack = vec![path.to_path_buf()];
@@ -319,16 +482,34 @@ pub fn recycle_bin_size() -> u64 {
         total
     }
 
+    fixed_drive_roots()
+        .iter()
+        .map(|root| dir_size(&Path::new(root).join("$Recycle.Bin")))
+        .sum()
+}
+
+/// How much space the Recycle Bin of every fixed drive is using.
+///
+/// Querying the Shell (instead of walking `$Recycle.Bin` ourselves) matters:
+/// the walk sees *every* user's bin plus orphaned SID folders left behind by
+/// deleted accounts, while `SHEmptyRecycleBin` only removes what the Shell
+/// considers recyclable. That mismatch is why the bin used to keep showing a
+/// size no matter how often it was cleaned.
+#[cfg(windows)]
+pub fn recycle_bin_size() -> u64 {
     let mut total = 0u64;
-    let mask = unsafe { GetLogicalDrives() };
-    for i in 0..26u32 {
-        if mask & (1u32 << i) == 0 {
-            continue;
+    let mut queried_any = false;
+    for root in fixed_drive_roots() {
+        if let Some(bytes) = query_recycle_bin(&root) {
+            queried_any = true;
+            total += bytes;
         }
-        let drive = format!("{}:\\", (b'A' + i as u8) as char);
-        total += dir_size(&Path::new(&drive).join("$Recycle.Bin"));
     }
-    total
+    if queried_any {
+        total
+    } else {
+        recycle_bin_size_by_walking()
+    }
 }
 
 #[cfg(not(windows))]
@@ -336,19 +517,34 @@ pub fn recycle_bin_size() -> u64 {
     0
 }
 
-/// Empty the Recycle Bin on all drives, without confirmation or progress UI.
+/// Combined flags for `SHEmptyRecycleBinW`: no prompt, no progress, no sound.
 #[cfg(windows)]
-pub fn empty_recycle_bin() -> bool {
+const EMPTY_FLAGS: DWORD = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+
+/// Empty the Recycle Bin, without confirmation or progress UI.
+///
+/// Returns the size `(before, after)` so the caller can report what was
+/// genuinely freed. The size is re-queried afterwards because
+/// `SHEmptyRecycleBinW` happily returns success while leaving items behind
+/// (files in use, or a bin owned by another user), and because it reports
+/// failure when the bin was already empty.
+///
+/// Drives are emptied one at a time in addition to the "all drives" call: on
+/// some systems the `NULL` root silently skips drives.
+#[cfg(windows)]
+pub fn empty_recycle_bin() -> (u64, u64) {
+    let before = recycle_bin_size();
     unsafe {
-        SHEmptyRecycleBinW(
-            null_mut(),
-            null_mut(),
-            SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND,
-        ) >= 0
+        SHEmptyRecycleBinW(null_mut(), std::ptr::null(), EMPTY_FLAGS);
+        for root in fixed_drive_roots() {
+            SHEmptyRecycleBinW(null_mut(), wide(&root).as_ptr(), EMPTY_FLAGS);
+        }
     }
+    let after = recycle_bin_size();
+    (before, after)
 }
 
 #[cfg(not(windows))]
-pub fn empty_recycle_bin() -> bool {
-    false
+pub fn empty_recycle_bin() -> (u64, u64) {
+    (0, 0)
 }

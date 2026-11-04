@@ -1,34 +1,96 @@
 # Changelog
 
-## 1.0.0 — 2026-11-04
+All notable changes to this project are documented in this file.
 
-First complete release.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Legend: **Added** · **Changed** · **Fixed** · **Safety** · **Removed**
+
+---
+
+## [Unreleased]
+
+### Fixed
+
+- **Recycle Bin kept reporting a size no matter how often it was emptied.**
+  The size was measured by walking `<drive>:\$Recycle.Bin`, which also counts
+  other accounts' bins and orphaned SID folders the Shell can never empty —
+  and it included removable drives and empty card readers that have no bin at
+  all. It now asks the Shell itself (`SHQueryRecycleBinW`) for the size of
+  each *fixed* drive, empties every drive explicitly in addition to the
+  all-drives call, then re-measures and reports what was genuinely freed.
+- **The summary claimed Recycle Bin space that was never freed.** Emptying
+  was reported as success on nothing but the API's return value; the result
+  is now verified (`before` vs `after`) and a bin that is still full is
+  reported as such (and yields exit code `1`).
+- **Prefetch (and other protected folders) could not be cleaned.** The
+  process never enabled the backup/restore rights its elevated token already
+  holds, so any file whose ACL refused the delete failed instantly. Those
+  privileges are now enabled at startup, blocking attributes are cleared, and
+  a sharing violation is retried a few times instead of giving up at once.
 
 ### Added
+
+- Skipped files are now counted **by reason** — too recent, in use, or access
+  denied — and shown in the console summary and the result toast.
+- Folders that cannot even be listed are reported ("could not be read —
+  access denied") instead of silently looking empty.
+- A warning in the confirmation dialog and the console when Temp Cleaner is
+  not running elevated, since that is the usual reason system locations are
+  reported as access denied.
+- Log lines now carry the real OS reason for every file that could not be
+  deleted instead of a generic "in use?".
+- The result toast grew a little to fit the extra detail.
+
+---
+
+## [1.0.0] — 2026-11-04
+
+First complete release: a safe GUI cleaner with a full scripting CLI.
+
+### Added
+
 - Fixed project layout (`src/main.rs`) so `cargo build` works out of the box.
-- Scan → confirm → clean GUI flow: a dialog shows the per-category
-  breakdown (files + size) before anything is deleted; the result toast
+- **Scan → confirm → clean GUI flow**: a dialog shows the per-category
+  breakdown (files + size) before anything is deleted, and the result toast
   reports files deleted, space freed and files skipped.
-- Full CLI: `--dry-run`, `--yes`, `--silent`, `--verbose`, `--min-age`,
+- **Full CLI**: `--dry-run`, `--yes`, `--silent`, `--verbose`, `--min-age`,
   `--only`, `--skip`, `--windows-update`, `--no-recycle-bin`, `--log`,
-  `--help`, `--version`, plus exit codes for scripting.
-- New cleaning categories: thumbnail & icon cache, crash dumps / WER
-  reports / `MEMORY.DMP`, Recycle Bin (all drives), and opt-in Windows
+  `--help`, `--version`, plus meaningful exit codes for scripting.
+- **New cleaning categories**: thumbnail & icon cache, crash dumps / WER
+  reports / `MEMORY.DMP`, Recycle Bin (all drives) and an opt-in Windows
   Update download cache — on top of user temp, Windows temp and Prefetch.
-- Timestamped log file support (`TempCleaner.log` by default in silent mode).
-- Application icon, version info, DPI-aware + long-path-aware manifest.
+- Timestamped log file support (`TempCleaner.log` next to the `.exe` by
+  default in silent mode).
+- Application icon, version info, DPI-aware and long-path-aware manifest.
 - GitHub Actions workflow: tests on every push, release binary on `v*` tags.
 - Unit tests for the cleaning engine, CLI parsing and formatting helpers.
 
 ### Safety
+
 - Files modified within the last 24 hours are kept by default
   (`--min-age 0` restores delete-everything behaviour).
-- Locked files are skipped; read-only files get one retry after clearing
-  the attribute.
-- Symlinks/junctions are never followed; protected system locations and
-  drive roots are refused; a target folder itself is never removed.
+- Locked files are skipped; read-only files get one retry after the read-only
+  attribute is cleared.
+- Symlinks and junctions are never followed.
+- Protected system locations and drive roots are refused by a hard safety
+  gate; a target folder itself is never removed, only its contents.
 
-## 0.1.0
+---
 
-- Initial prototype: cleaned `%TEMP%`, `C:\Windows\Temp` and Prefetch,
-  then showed a 2-second toast with the totals.
+## [0.1.0]
+
+Initial prototype.
+
+### Added
+
+- Cleaned `%TEMP%`, `C:\Windows\Temp` and Prefetch, then showed a 2-second
+  toast with the totals.
+
+---
+
+[Unreleased]: https://github.com/Sajedur0/Temp-Cleaner/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Sajedur0/Temp-Cleaner/releases/tag/v1.0.0
+[0.1.0]: https://github.com/Sajedur0/Temp-Cleaner/commits/a572f77dbf0cf05b1c456af943c44ab637a40a37
