@@ -1,12 +1,35 @@
 [package]
 name = "temp_cleaner"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "A fast, safe temp-file cleaner for Windows — GUI toast for double-click use, scriptable CLI for automation"
+license = "Apache-2.0"
+repository = "https://github.com/Sajedur0/Temp-Cleaner"
+homepage = "https://github.com/Sajedur0/Temp-Cleaner"
+keywords = ["windows", "cleanup", "temp", "utility"]
+categories = ["command-line-utilities"]
 
-[dependencies]
-winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "winnt"] }
+[[bin]]
+name = "TempCleaner"
+path = "src/main.rs"
 
-[build-dependencies]
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = [
+    "fileapi",
+    "handleapi",
+    "libloaderapi",
+    "minwindef",
+    "processenv",
+    "shellapi",
+    "winbase",
+    "wincon",
+    "windef",
+    "wingdi",
+    "winnt",
+    "winuser",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [profile.release]
