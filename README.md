@@ -11,10 +11,10 @@ Double-click it and it scans, shows exactly what will be deleted, cleans on
 confirmation and reports the result in a toast — or drive it entirely from
 the command line / Task Scheduler.
 
-> **বাংলা:** ডাবল-ক্লিক করলেই স্ক্যান করে, কী মুছবে তা দেখিয়ে অনুমতি নিয়ে
-> ক্লিন করে দেয়। চাইলে কমান্ড লাইন থেকেও চালানো যায়
-> (`TempCleaner.exe --dry-run`, `--yes`, `--silent` ইত্যাদি)।
-> শেষ ২৪ ঘণ্টায় বদলানো ফাইল নিরাপত্তার জন্য রেখে দেওয়া হয়।
+> **Quick note:** Double-click to scan, review what will be removed, and
+> clean with a single confirmation — or use the command line instead
+> (`TempCleaner.exe --dry-run`, `--yes`, `--silent`, and more).
+> For safety, files modified within the last 24 hours are kept by default.
 
 ---
 
@@ -263,7 +263,7 @@ Please report bugs and request features via
 
 ## 📜 License
 
-Copyright 2026 Sajedur Rahman Roni
+Copyright 2026 Sajedur0
 
 Licensed under the **Apache License, Version 2.0**. You may obtain a copy of
 the License at <http://www.apache.org/licenses/LICENSE-2.0> — see the
