@@ -1,7 +1,7 @@
 //! Small formatting helpers and the run logger. Pure `std`.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,7 +70,7 @@ pub fn format_timestamp(t: SystemTime) -> String {
 /// console. `detail` lines only reach the console in verbose mode, so a
 /// normal run stays short while the log file keeps the full picture.
 pub struct Logger {
-    file: Option<File>,
+    file: Option<BufWriter<File>>,
     console: bool,
     verbose_console: bool,
 }
@@ -82,7 +82,7 @@ impl Logger {
                 let _ = std::fs::create_dir_all(parent);
             }
             match std::fs::OpenOptions::new().create(true).append(true).open(p) {
-                Ok(f) => Some(f),
+                Ok(f) => Some(BufWriter::new(f)),
                 Err(e) => {
                     if console {
                         println!("Warning: could not open log file {}: {}", p.display(), e);
@@ -115,7 +115,6 @@ impl Logger {
     fn write_file(&mut self, msg: &str) {
         if let Some(f) = &mut self.file {
             let _ = writeln!(f, "[{}] {}", format_timestamp(SystemTime::now()), msg);
-            let _ = f.flush();
         }
     }
 }

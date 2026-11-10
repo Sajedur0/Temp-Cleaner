@@ -2,6 +2,7 @@
 //! are old enough, which folders are safe to touch) lives here so it can be
 //! unit-tested on any OS with real files in a sandbox directory.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -260,14 +261,18 @@ pub fn is_old_enough(modified: Option<SystemTime>, min_age: Duration, now: Syste
     }
 }
 
-fn name_matches(file_name: &str, mode: &CleanMode) -> bool {
+fn name_matches(file_name: &OsStr, mode: &CleanMode) -> bool {
     match mode {
         CleanMode::Matching { prefixes, suffix } => {
-            let name = file_name.to_lowercase();
-            name.ends_with(&suffix.to_lowercase())
-                && prefixes
-                    .iter()
-                    .any(|p| name.starts_with(&p.to_lowercase()))
+            let name = file_name.to_string_lossy();
+            name.len() >= suffix.len()
+                && name
+                    .get(name.len() - suffix.len()..)
+                    .is_some_and(|end| end.eq_ignore_ascii_case(suffix))
+                && prefixes.iter().any(|prefix| {
+                    name.get(..prefix.len())
+                        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+                })
         }
         _ => true,
     }
@@ -421,11 +426,9 @@ pub fn scan_target(target: &Target, min_age: Duration, now: SystemTime) -> Repor
             report.exists = true;
             let mut walker = Walker::new();
             walker.run(&target.path, &mut |path, meta| {
-                let name = path
+                if path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if name_matches(&name, &target.mode)
+                    .is_some_and(|name| name_matches(name, &target.mode))
                     && is_old_enough(meta.modified().ok(), min_age, now)
                 {
                     report.files_found += 1;
@@ -504,13 +507,11 @@ pub fn clean_target(
             report.exists = true;
             let remove_empty_dirs = matches!(target.mode, CleanMode::AllContents);
             let mut walker = Walker::new();
-            let mode = target.mode.clone();
             walker.run(&target.path, &mut |path, meta| {
-                let name = path
+                if !path
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if !name_matches(&name, &mode) {
+                    .is_some_and(|name| name_matches(name, &target.mode))
+                {
                     return;
                 }
                 if !is_old_enough(meta.modified().ok(), min_age, now) {
